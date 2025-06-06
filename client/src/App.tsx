@@ -1,11 +1,10 @@
-
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { trpc } from '@/utils/trpc';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { GameCanvas } from '@/components/GameCanvas';
 import { Leaderboard } from '@/components/Leaderboard';
 import { PlayerNameDialog } from '@/components/PlayerNameDialog';
-import type { Player, Food, GameState } from '../../server/src/schema';
+import type { Player, Food, GameState, ClientMessage, ServerMessage } from '../../server/src/schema';
 
 function App() {
   const [gameState, setGameState] = useState<GameState | null>(null);
@@ -15,12 +14,18 @@ function App() {
   const [showNameDialog, setShowNameDialog] = useState(true);
   const [isGameStarted, setIsGameStarted] = useState(false);
   const [gameLoading, setGameLoading] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
   
   // Mouse position for player movement
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const gameContainerRef = useRef<HTMLDivElement>(null);
+  
+  // WebSocket connection
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<Timer | null>(null);
+  const pingIntervalRef = useRef<Timer | null>(null);
 
-  // Initialize game
+  // Initialize game (only needed for initial setup now)
   const initializeGame = useCallback(async () => {
     try {
       await trpc.initializeGame.mutate();
@@ -31,17 +36,129 @@ function App() {
     }
   }, []);
 
-  // Load game data
-  const loadGameData = useCallback(async () => {
-    try {
-      const [playersData, foodData] = await Promise.all([
-        trpc.getPlayers.query(),
-        trpc.getFood.query()
-      ]);
-      setPlayers(playersData);
-      setFood(foodData);
-    } catch (error) {
-      console.error('Failed to load game data:', error);
+  // WebSocket connection management
+  const connectWebSocket = useCallback(() => {
+    if (!currentPlayer) return;
+
+    const wsUrl = `ws://localhost:3001`;
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+    setConnectionStatus('connecting');
+
+    ws.onopen = () => {
+      console.log('WebSocket connected');
+      setConnectionStatus('connected');
+      
+      // Start ping interval
+      pingIntervalRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          const pingMessage: ClientMessage = {
+            type: 'ping',
+            data: { timestamp: Date.now() }
+          };
+          ws.send(JSON.stringify(pingMessage));
+        }
+      }, 30000); // Ping every 30 seconds
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const message: ServerMessage = JSON.parse(event.data);
+        handleServerMessage(message);
+      } catch (error) {
+        console.error('Error parsing server message:', error);
+      }
+    };
+
+    ws.onclose = () => {
+      console.log('WebSocket disconnected');
+      setConnectionStatus('disconnected');
+      
+      // Clear intervals
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+        pingIntervalRef.current = null;
+      }
+      
+      // Attempt to reconnect after 3 seconds
+      if (currentPlayer && isGameStarted) {
+        reconnectTimeoutRef.current = setTimeout(() => {
+          console.log('Attempting to reconnect...');
+          connectWebSocket();
+        }, 3000);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      setConnectionStatus('disconnected');
+    };
+  }, [currentPlayer, isGameStarted]);
+
+  // Handle server messages
+  const handleServerMessage = useCallback((message: ServerMessage) => {
+    switch (message.type) {
+      case 'game_state':
+        setPlayers(message.data.players);
+        setFood(message.data.food);
+        setGameState(message.data.gameState);
+        
+        // Update current player data
+        if (currentPlayer) {
+          const updatedCurrentPlayer = message.data.players.find(p => p.id === currentPlayer.id);
+          if (updatedCurrentPlayer && updatedCurrentPlayer.is_alive) {
+            setCurrentPlayer(updatedCurrentPlayer);
+          } else {
+            // Player was consumed/died
+            console.log('Player died, returning to name dialog');
+            setCurrentPlayer(null);
+            setIsGameStarted(false);
+            setShowNameDialog(true);
+          }
+        }
+        break;
+
+      case 'player_update':
+        setPlayers(prev => prev.map(p => 
+          p.id === message.data.player.id ? message.data.player : p
+        ));
+        
+        if (currentPlayer && message.data.player.id === currentPlayer.id) {
+          setCurrentPlayer(message.data.player);
+        }
+        break;
+
+      case 'player_consumed':
+        console.log(`Player ${message.data.consumerId} consumed ${message.data.consumedId}`);
+        break;
+
+      case 'player_died':
+        console.log(`Player ${message.data.playerId} died`);
+        if (currentPlayer && message.data.playerId === currentPlayer.id) {
+          setCurrentPlayer(null);
+          setIsGameStarted(false);
+          setShowNameDialog(true);
+        }
+        break;
+
+      case 'food_spawned':
+        setFood(message.data.food);
+        break;
+
+      case 'pong':
+        // Handle ping response if needed
+        break;
+
+      case 'error':
+        console.error('Server error:', message.data.message);
+        break;
+    }
+  }, [currentPlayer]);
+
+  // Send WebSocket message
+  const sendWebSocketMessage = useCallback((message: ClientMessage) => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(message));
     }
   }, []);
 
@@ -53,7 +170,6 @@ function App() {
       setCurrentPlayer(newPlayer);
       setShowNameDialog(false);
       setIsGameStarted(true);
-      await loadGameData();
     } catch (error) {
       console.error('Failed to create player:', error);
     } finally {
@@ -61,25 +177,24 @@ function App() {
     }
   };
 
-  // Update player position based on mouse
-  const updatePlayerPosition = useCallback(async (x: number, y: number) => {
+  // Update player position via WebSocket
+  const updatePlayerPosition = useCallback((x: number, y: number) => {
     if (!currentPlayer) return;
     
-    try {
-      await trpc.updatePlayerPosition.mutate({
-        id: currentPlayer.id,
-        x,
-        y
-      });
-      // Update local state
-      setCurrentPlayer(prev => prev ? { ...prev, x, y } : null);
-      setPlayers(prev => prev.map(p => 
-        p.id === currentPlayer.id ? { ...p, x, y } : p
-      ));
-    } catch (error) {
-      console.error('Failed to update position:', error);
-    }
-  }, [currentPlayer]);
+    const message: ClientMessage = {
+      type: 'move',
+      data: {
+        playerId: currentPlayer.id,
+        targetX: x,
+        targetY: y
+      }
+    };
+    
+    sendWebSocketMessage(message);
+    
+    // Optimistically update local position for smoother movement
+    setCurrentPlayer(prev => prev ? { ...prev, x, y } : null);
+  }, [currentPlayer, sendWebSocketMessage]);
 
   // Handle mouse movement
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
@@ -93,60 +208,60 @@ function App() {
     updatePlayerPosition(x, y);
   }, [currentPlayer, gameState, updatePlayerPosition]);
 
-  // Try to consume targets
-  const tryConsume = useCallback(async (targetId: string, targetType: 'player' | 'food') => {
+  // Try to consume targets via WebSocket
+  const tryConsume = useCallback((targetId: string, targetType: 'player' | 'food') => {
     if (!currentPlayer) return;
     
-    try {
-      await trpc.consumeTarget.mutate({
-        player_id: currentPlayer.id,
-        target_id: targetId,
-        target_type: targetType
-      });
-      // Reload game data after consumption
-      await loadGameData();
-      // Update current player data
-      const updatedPlayers = await trpc.getPlayers.query();
-      const updatedCurrentPlayer = updatedPlayers.find(p => p.id === currentPlayer.id);
-      if (updatedCurrentPlayer) {
-        setCurrentPlayer(updatedCurrentPlayer);
+    const message: ClientMessage = {
+      type: 'consume',
+      data: {
+        playerId: currentPlayer.id,
+        targetId,
+        targetType
       }
-    } catch (error) {
-      console.error('Failed to consume target:', error);
-    }
-  }, [currentPlayer, loadGameData]);
+    };
+    
+    sendWebSocketMessage(message);
+  }, [currentPlayer, sendWebSocketMessage]);
 
-  // Auto-spawn food periodically
+  // Connect WebSocket when game starts
   useEffect(() => {
-    if (!isGameStarted) return;
+    if (isGameStarted && currentPlayer) {
+      connectWebSocket();
+    }
     
-    const spawnInterval = setInterval(async () => {
-      try {
-        await trpc.spawnFood.mutate({ count: 5 });
-        await loadGameData();
-      } catch (error) {
-        console.error('Failed to spawn food:', error);
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
       }
-    }, 3000);
-    
-    return () => clearInterval(spawnInterval);
-  }, [isGameStarted, loadGameData]);
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+      }
+    };
+  }, [isGameStarted, currentPlayer, connectWebSocket]);
 
   // Initialize game on mount
   useEffect(() => {
     initializeGame();
   }, [initializeGame]);
 
-  // Refresh game data periodically
+  // Cleanup on unmount
   useEffect(() => {
-    if (!isGameStarted) return;
-    
-    const refreshInterval = setInterval(() => {
-      loadGameData();
-    }, 1000);
-    
-    return () => clearInterval(refreshInterval);
-  }, [isGameStarted, loadGameData]);
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (pingIntervalRef.current) {
+        clearInterval(pingIntervalRef.current);
+      }
+    };
+  }, []);
 
   if (showNameDialog) {
     return <PlayerNameDialog onCreatePlayer={createPlayer} isLoading={gameLoading} />;
@@ -179,6 +294,19 @@ function App() {
               <div className="text-xs opacity-75">
                 Position: ({Math.round(currentPlayer.x)}, {Math.round(currentPlayer.y)})
               </div>
+              <div className="text-xs flex items-center gap-1">
+                Connection: 
+                <span className={`inline-block w-2 h-2 rounded-full ${
+                  connectionStatus === 'connected' ? 'bg-green-400' : 
+                  connectionStatus === 'connecting' ? 'bg-yellow-400' : 'bg-red-400'
+                }`}></span>
+                <span className={
+                  connectionStatus === 'connected' ? 'text-green-400' : 
+                  connectionStatus === 'connecting' ? 'text-yellow-400' : 'text-red-400'
+                }>
+                  {connectionStatus}
+                </span>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -202,7 +330,7 @@ function App() {
           // Find nearby food or smaller players
           const nearbyFood = food.find(f => {
             const distance = Math.sqrt(Math.pow(f.x - clickX, 2) + Math.pow(f.y - clickY, 2));
-            return distance < 20;
+            return distance < 30;
           });
           
           if (nearbyFood) {
@@ -211,9 +339,9 @@ function App() {
           }
           
           const nearbyPlayer = players.find(p => {
-            if (p.id === currentPlayer.id || p.mass >= currentPlayer.mass) return false;
+            if (p.id === currentPlayer.id || p.mass >= currentPlayer.mass || !p.is_alive) return false;
             const distance = Math.sqrt(Math.pow(p.x - clickX, 2) + Math.pow(p.y - clickY, 2));
-            return distance < Math.max(currentPlayer.mass / 2, 15);
+            return distance < Math.max(currentPlayer.mass / 2, 20);
           });
           
           if (nearbyPlayer) {
@@ -239,6 +367,7 @@ function App() {
               <div>🍎 Click near food to consume it</div>
               <div>🦠 Click near smaller players to consume them</div>
               <div>📈 Grow bigger to climb the leaderboard!</div>
+              <div className="text-yellow-300">⚡ Real-time multiplayer via WebSocket</div>
             </div>
           </CardContent>
         </Card>

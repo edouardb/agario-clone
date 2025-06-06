@@ -82,40 +82,92 @@ export const spawnFoodInputSchema = z.object({
 
 export type SpawnFoodInput = z.infer<typeof spawnFoodInputSchema>;
 
-// WebSocket message schemas
-export const gameEventSchema = z.object({
-  type: z.enum(['player_joined', 'player_left', 'player_moved', 'player_consumed', 'food_spawned', 'food_consumed', 'leaderboard_updated']),
-  data: z.unknown()
-});
-
-export type GameEvent = z.infer<typeof gameEventSchema>;
-
-export const playerJoinedEventSchema = z.object({
-  type: z.literal('player_joined'),
-  data: playerSchema
-});
-
-export type PlayerJoinedEvent = z.infer<typeof playerJoinedEventSchema>;
-
-export const playerMovedEventSchema = z.object({
-  type: z.literal('player_moved'),
-  data: z.object({
-    id: z.string(),
-    x: z.number(),
-    y: z.number()
+// WebSocket message schemas - Client to Server
+export const clientMessageSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('move'),
+    data: z.object({
+      playerId: z.string(),
+      targetX: z.number(),
+      targetY: z.number()
+    })
+  }),
+  z.object({
+    type: z.literal('consume'),
+    data: z.object({
+      playerId: z.string(),
+      targetId: z.string(),
+      targetType: z.enum(['player', 'food'])
+    })
+  }),
+  z.object({
+    type: z.literal('ping'),
+    data: z.object({
+      timestamp: z.number()
+    })
   })
-});
+]);
 
-export type PlayerMovedEvent = z.infer<typeof playerMovedEventSchema>;
+export type ClientMessage = z.infer<typeof clientMessageSchema>;
 
-export const consumeEventSchema = z.object({
-  type: z.literal('player_consumed'),
-  data: z.object({
-    consumer_id: z.string(),
-    consumed_id: z.string(),
-    new_mass: z.number(),
-    target_type: z.enum(['player', 'food'])
+// WebSocket message schemas - Server to Client
+export const serverMessageSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('game_state'),
+    data: z.object({
+      players: z.array(playerSchema),
+      food: z.array(foodSchema),
+      gameState: gameStateSchema
+    })
+  }),
+  z.object({
+    type: z.literal('player_update'),
+    data: z.object({
+      player: playerSchema
+    })
+  }),
+  z.object({
+    type: z.literal('player_consumed'),
+    data: z.object({
+      consumerId: z.string(),
+      consumedId: z.string(),
+      newMass: z.number(),
+      targetType: z.enum(['player', 'food'])
+    })
+  }),
+  z.object({
+    type: z.literal('player_died'),
+    data: z.object({
+      playerId: z.string()
+    })
+  }),
+  z.object({
+    type: z.literal('food_spawned'),
+    data: z.object({
+      food: z.array(foodSchema)
+    })
+  }),
+  z.object({
+    type: z.literal('pong'),
+    data: z.object({
+      timestamp: z.number()
+    })
+  }),
+  z.object({
+    type: z.literal('error'),
+    data: z.object({
+      message: z.string()
+    })
   })
+]);
+
+export type ServerMessage = z.infer<typeof serverMessageSchema>;
+
+// Game state update for real-time sync
+export const gameStateUpdateSchema = z.object({
+  players: z.array(playerSchema),
+  food: z.array(foodSchema),
+  gameState: gameStateSchema
 });
 
-export type ConsumeEvent = z.infer<typeof consumeEventSchema>;
+export type GameStateUpdate = z.infer<typeof gameStateUpdateSchema>;

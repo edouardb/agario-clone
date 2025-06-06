@@ -28,9 +28,10 @@ export function Leaderboard({ currentPlayerId }: LeaderboardProps) {
   useEffect(() => {
     loadLeaderboard();
     
+    // Reduce polling frequency since WebSocket provides real-time updates
     const interval = setInterval(() => {
       loadLeaderboard();
-    }, 2000);
+    }, 5000); // Every 5 seconds instead of 2
     
     return () => clearInterval(interval);
   }, [loadLeaderboard]);

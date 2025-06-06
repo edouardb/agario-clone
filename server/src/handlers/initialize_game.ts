@@ -24,25 +24,46 @@ export const initializeGame = async (): Promise<GameState> => {
     }
 
     // If no game state exists, create a new default one
-    const result = await db.insert(gameStateTable)
-      .values({
-        id: 'default',
-        map_width: 2000,
-        map_height: 2000,
-        max_players: 50,
-        food_spawn_rate: 0.5
-      })
-      .returning()
-      .execute();
+    try {
+      const result = await db.insert(gameStateTable)
+        .values({
+          id: 'default',
+          map_width: 2000,
+          map_height: 2000,
+          max_players: 50,
+          food_spawn_rate: 0.5
+        })
+        .returning()
+        .execute();
 
-    // Convert real fields back to numbers before returning
-    const gameState = result[0];
-    return {
-      ...gameState,
-      map_width: Number(gameState.map_width),
-      map_height: Number(gameState.map_height),
-      food_spawn_rate: Number(gameState.food_spawn_rate)
-    };
+      // Convert real fields back to numbers before returning
+      const gameState = result[0];
+      return {
+        ...gameState,
+        map_width: Number(gameState.map_width),
+        map_height: Number(gameState.map_height),
+        food_spawn_rate: Number(gameState.food_spawn_rate)
+      };
+    } catch (insertError: any) {
+      // If insert fails due to duplicate key, try to fetch existing again
+      if (insertError.message?.includes('duplicate key')) {
+        const gameStateRetry = await db.select()
+          .from(gameStateTable)
+          .where(eq(gameStateTable.id, 'default'))
+          .execute();
+
+        if (gameStateRetry.length > 0) {
+          const gameState = gameStateRetry[0];
+          return {
+            ...gameState,
+            map_width: Number(gameState.map_width),
+            map_height: Number(gameState.map_height),
+            food_spawn_rate: Number(gameState.food_spawn_rate)
+          };
+        }
+      }
+      throw insertError;
+    }
   } catch (error) {
     console.error('Game initialization failed:', error);
     throw error;
