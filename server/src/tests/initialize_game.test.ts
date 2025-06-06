@@ -47,11 +47,33 @@ describe('initializeGame', () => {
     expect(gameStates[0].updated_at).toBeInstanceOf(Date);
   });
 
-  it('should handle duplicate initialization gracefully', async () => {
+  it('should return existing game state on subsequent calls', async () => {
     // First initialization should succeed
-    await initializeGame();
+    const firstResult = await initializeGame();
 
-    // Second initialization should fail due to unique primary key
-    await expect(initializeGame()).rejects.toThrow(/duplicate key value/i);
+    // Second initialization should return the same existing state
+    const secondResult = await initializeGame();
+
+    // Both should be identical
+    expect(secondResult.id).toEqual(firstResult.id);
+    expect(secondResult.map_width).toEqual(firstResult.map_width);
+    expect(secondResult.map_height).toEqual(firstResult.map_height);
+    expect(secondResult.max_players).toEqual(firstResult.max_players);
+    expect(secondResult.food_spawn_rate).toEqual(firstResult.food_spawn_rate);
+    expect(secondResult.created_at).toEqual(firstResult.created_at);
+    expect(secondResult.updated_at).toEqual(firstResult.updated_at);
+
+    // Verify numeric types on second call
+    expect(typeof secondResult.map_width).toBe('number');
+    expect(typeof secondResult.map_height).toBe('number');
+    expect(typeof secondResult.food_spawn_rate).toBe('number');
+
+    // Verify only one record exists in database
+    const gameStates = await db.select()
+      .from(gameStateTable)
+      .where(eq(gameStateTable.id, 'default'))
+      .execute();
+
+    expect(gameStates).toHaveLength(1);
   });
 });
